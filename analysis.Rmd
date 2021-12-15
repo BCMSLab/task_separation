@@ -1,0 +1,1006 @@
+---
+title: "Analysis of gene-protein separation in cancer cells"
+author: "Mahmoud Ahmed"
+date: "11/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, fig.width = 5, fig.height = 5, fig.align = 'center')
+```
+
+```{r load_libraries}
+# load required libraries
+library(tidyverse)
+library(reshape2)
+library(clusterProfiler)
+library(cowplot)
+library(jtools)
+library(lme4)
+library(nlme)
+```
+
+```{r ggplot_theme}
+# define ggplot theme
+my_theme <- theme(panel.grid = element_blank(),
+                  panel.border = element_rect(fill = NA, color = 'black', size = 1),
+                  panel.background = element_blank(),
+                  axis.title.x.top = element_blank(),
+                  axis.text.x.top = element_blank(),
+                  axis.title.y.right = element_blank(),
+                  axis.text.y.right = element_blank(),
+                  legend.background = element_blank(),
+                  axis.ticks.length=unit(2, "mm"))
+```
+
+# Datasets
+
+The datasets used in this manuscript are the following:
+
+- `proteins`: protein level data of different cancer cell lines
+- `genes`: gene expression data of the same cell lines
+- `growth`: division rate and growth inhibition data of a subset of the cell lines under drug perturbations
+- `hallmarks`: lists of genes involved in the different cancer hall marks
+
+The code in `code/prepare_data` download and tidy the data sets
+
+```{r prepare_data, eval=FALSE}
+# download and prepare the datasets
+# source('code/prepare_data.R')
+```
+
+```{r load_data}
+# load data
+proteins <- read_rds('data/breast_cells_proteins.rds')
+genes <- read_rds('data/breast_cells_genes.rds')
+growth <- read_rds('data/breast_cells_growth.rds')
+hallmarks <- read_rds('data/hallmarks_sets.rds')
+
+# extract cells and symbols in common
+common_cells <- intersect(colnames(genes), colnames(proteins))
+common_symbols <- intersect(rownames(genes), rownames(proteins))
+
+# subset genes and proteins
+genes <- genes[common_symbols, common_cells]
+proteins <- proteins[common_symbols, common_cells]
+
+# test all have the same dims
+dim(genes); dim(proteins)
+
+# test all have the same names
+all(colnames(genes) == colnames(genes))
+all(rownames(genes) == rownames(proteins))
+```
+
+The following show the names and numbers of gene products, cell lines and drugs in the datasets.
+
+```{r show_numbers}
+# the number of cell lines
+ncol(genes); ncol(proteins)
+colnames(genes)
+
+# the number of gene products
+nrow(genes); nrow(proteins)
+
+# the number of drugs
+length(unique(growth$Small.Molecule.Name))
+```
+
+# Analysis
+
+This analysis aim to
+
+- Explore the correlation between gene and protein levels in cancer cell lines
+- Show that these correlations systematically differ for cancer hallmark gene products
+- Establish a correlation between gene-protein separation of the hallmarks and division rates under normal conditions and under drug perturbation
+- Show how the range of enrichment associate with the same growth variables
+
+## The correlation between gene and protein levels
+
+```{r gene_protein_correaltion}
+# calculate the correlation between genes and proteins in all cells
+gene_protein_corr <- cor(genes, proteins, use = 'complete')
+
+# make a tidy data.frame, and group by same or other cells
+gene_protein_corr <- melt(gene_protein_corr) %>%
+  mutate(group = ifelse(Var1 == Var2, 'Same cell', 'Other cells')) %>%
+  as_tibble()
+```
+
+```{r gene_protein_corr_plot}
+# plot the correlations within cell type and in between
+corr_groups <- split(gene_protein_corr$value, gene_protein_corr$group)
+corr_groups_ttest <- t.test(corr_groups$`Same cell`,
+                            corr_groups$`Other cells`,
+                            alternative = 'greater')
+
+gene_protein_corr_plot <- gene_protein_corr %>%
+  mutate(group = str_split(group, ' ', simplify = TRUE)[,1]) %>%
+  ggplot(aes(x = value, fill = group)) +
+  geom_bar(stat="bin", aes(y=..density..), alpha = .5) +
+  scale_x_continuous(sec.axis = dup_axis(), limits = c(.09, .41)) +
+  scale_y_continuous(sec.axis = dup_axis()) +
+  geom_vline(xintercept = corr_groups_ttest$estimate,
+             color = c('blue', 'red'),
+             lty = 2) +
+  geom_segment(aes(x = corr_groups_ttest$estimate[1],
+                   xend = corr_groups_ttest$estimate[2],
+                   y = 13, yend = 13),
+               arrow = arrow(length = unit(2, 'mm'))) +
+  geom_segment(aes(xend = corr_groups_ttest$estimate[1],
+                   x = corr_groups_ttest$estimate[2],
+                   y = 13, yend = 13),
+               arrow = arrow(length = unit(2, 'mm'))) +
+  annotate('text', x = .24, y = 16, size = 3, hjust = 0,
+           label = paste('t =', round(corr_groups_ttest$statistic, 1))) +
+  annotate('text', x = .24, y = 14.5, size = 3, hjust = 0,
+           label = paste('P < 0.0001')) +
+  labs(x = 'Gene-protein Correlation',
+       y = 'Percent of cell lines',
+       fill = '') +
+  theme(legend.position = c(.2, .9),
+        legend.background = element_blank()) +
+  my_theme
+
+gene_protein_corr_plot
+
+
+plot_grid(gene_protein_corr_plot,
+          hallmark_correlation_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/gene_protein_correlation.png',
+         width = 6, height = 3)
+```
+
+The figure shows that the gene protein correaltion is higher within cells, compared to between cells.
+
+```{r average_correlation}
+# average gene protein correlation
+gene_protein_corr %>%
+  group_by(group) %>%
+  summarise(mean = mean(value),
+            min = min(value),
+            max = max(value))
+```
+
+```{r test_correlations}
+# test the correlation within cell type and in between
+corr_test <- ks.test(corr_groups$`Other cells`,
+                     corr_groups$`Same cell`)
+corr_test
+```
+
+The maximum distance between the two curves is `r round(corr_test$statistic, 2)`
+The p-value of the test is `r corr_test$p.value`
+
+```{r gene_protein_test_plot}
+# generate ecdf curves plots
+## calculate the ecdf for each group
+ccdf1 <- ecdf(corr_groups$`Same cell`) 
+ccdf2 <- ecdf(corr_groups$`Other cells`)
+
+## get the minimum and maximum of the cumulative percentages
+minMax <- seq(min(corr_groups$`Same cell`, corr_groups$`Other cells`),
+              max(corr_groups$`Same cell`, corr_groups$`Other cells`),
+              length.out=length(corr_groups$`Same cell`)) 
+
+## extract the position of the maximum difference
+xx0 <- minMax[which( abs(ccdf1(minMax) - ccdf2(minMax)) == max(abs(ccdf1(minMax) - ccdf2(minMax))) )] 
+yy0 <- ccdf1(xx0) 
+yy1 <- ccdf2(xx0) 
+
+## generate a title
+tt1 <- paste0(
+  'D^+ = ',
+  round(corr_test$statistic, 2),
+  '; P ',
+  ifelse(corr_test$p.value < .0001,
+         '< 0.0001',
+         paste0('= ', round(corr_test$p.value, 3)))
+)
+
+# make a plot
+gene_protein_test_plot <- gene_protein_corr %>%
+  ggplot() +
+  stat_ecdf(aes(x = value, color = group)) +
+  geom_segment(aes(x = xx0[1], y = yy0[1], xend = xx0[1], yend = yy1[1]),
+               linetype = "dashed" ) +
+  geom_point(aes(x = xx0[1] , y= yy0[1]), size=3) +
+  geom_point(aes(x = xx0[1] , y= yy1[1]), size=3) +
+  ggtitle(tt1) + 
+  labs(x = 'Gene-protein Correlation',
+       y = 'ECDF',
+       color = '') +
+  theme(legend.position = c(.25,.85),
+        legend.background = element_blank())
+
+gene_protein_test_plot
+```
+
+The figure visualizes the results of th KS test.
+
+## Gene-protein correlations in cancer hallmakr gene sets
+
+Here, we calculate similar correlation coefficients (Pearsons) for the gene sets involved in cancer hallmarks in each cell line.
+
+```{r pearson_by_hallmark}
+# calculate the pearsons correlation for the gene products in each hallmark
+gene_protein_hallmark <- map_df(
+  hallmarks,
+  function(x) {
+    as_tibble(
+      melt(
+        cor(
+          genes[intersect(rownames(genes), x),],
+          proteins[intersect(rownames(proteins), x),],
+          use = 'complete'
+        )
+      )
+    )
+  }, .id = 'hallmark') %>%
+  filter(Var1 == Var2)
+
+head(gene_protein_hallmark)
+```
+
+Also, we calculate the Spearman rank correlations.
+
+```{r spearman_by_hallmark}
+# calculate the spearman correlation for the gene products in each hallmark
+gene_protein_hallmark_spearman <- map_df(
+  hallmarks,
+  function(x) {
+    as_tibble(
+      melt(
+        cor(
+          genes[intersect(rownames(genes), x),],
+          proteins[intersect(rownames(proteins), x),],
+          use = 'complete',
+          method = 'spearman'
+        )
+      )
+    )
+  }, .id = 'hallmark') %>%
+  filter(Var1 == Var2)
+
+head(gene_protein_hallmark_spearman)
+```
+
+Then we generate a random gene set of 500 gene products and calculate similar correlation coefficients.
+
+```{r random_set}
+# generate a random set of genes
+set.seed(123)
+random_set <- sample(rownames(genes), 500)
+```
+
+```{r pearson_in_random}
+# calculate the correlation for the random set
+gene_protein_random <- cor(
+  genes[intersect(rownames(genes), random_set),],
+  proteins[intersect(rownames(proteins), random_set),],
+  use = 'complete'
+) %>%
+  melt() %>%
+  as_tibble() %>%
+  filter(Var1 == Var2) %>%
+  mutate(hallmark = 'random')
+
+head(gene_protein_random)
+```
+
+Then, we used a linear model to compare the average gene-protein correlation in the hallmarks with the random gene set.
+
+```{r test_random_corr}
+# test the correlation in the random set
+## split by hallmark
+hallmark_groups <- split(gene_protein_hallmark$value,
+                         gene_protein_hallmark$hallmark)
+
+## add random set
+hallmark_groups$random <- gene_protein_random$value
+
+## make a data.frame
+hallmark_groups_df <- melt(hallmark_groups) %>%
+  mutate(L1 = relevel(factor(L1), ref = 'random'))
+
+## apply lm
+cor_lm <- lm(value ~ L1, data = hallmark_groups_df)
+summary(cor_lm)
+```
+
+Next, we applied analysis of variance to the resulting linear model
+
+```{r corr_annova}
+# apply annova
+corr_anova <- anova(cor_lm)
+corr_anova
+```
+
+The F-statistics is `r corr_anova$'F value'[1]` and the p-value is `r corr_anova$'Pr(>F)'[2]`
+
+```{r corr_lm_plot}
+# make a plot for the linear effects on the correlation
+## make title
+tt2 <- paste0(
+  'F = ',
+  round(corr_anova$`F value`[1], 2),
+  '; P ',
+  ifelse(corr_anova$`Pr(>F)`[1] < .0001,
+         '< 0.0001',
+         paste0('= ', round(corr_anova$`Pr(>F)`[1], 3)))
+)
+
+# merge and tidy coefficients and confidence intervals
+cor_lm_df <- as.data.frame(confint(cor_lm)) %>%
+  set_names(c('lower', 'upper')) %>%
+  rownames_to_column('term') %>%
+  left_join(broom::tidy(cor_lm)) %>%
+  filter(term != '(Intercept)') %>%
+  mutate(hallmark = as.numeric(fct_reorder(term, (estimate))))
+
+# make graph
+corr_lm_plot <-  cor_lm_df %>%
+  ggplot(aes(x = hallmark, y = estimate)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lower, ymax = upper)) +
+  scale_x_continuous(breaks = 1:10, labels = paste0('#', 1:10)) +
+  coord_flip() +
+  labs(x = 'Cancer Hallmarks',
+       y = 'Gene-protein Correlation (Estimate)') +
+  ggtitle(tt2)
+
+corr_lm_plot
+```
+
+This figure reports the results on the linear model and shows that the average gene protein correlation in all hallmarks were significantly different from the random set.
+
+## Cancer hallmarks enrichment in gene and protein based ranks
+
+The next step is to rank the gene products based on gene and protein levels and calculate the enrichment of the cancer hallmark gene sets in the ranked lists.
+
+```{r genes_ernichment}
+# enrichment of hallmarks in breast cancer cells (genes) ----
+# term_gene <- melt(hallmarks) %>%
+#   as_tibble() %>%
+#   dplyr::select(term = L1, gene = value)
+# 
+# stats <- lapply(seq_len(ncol(genes)), function(i) genes[,i])
+# stats <- map(stats, sort, decreasing = TRUE)
+# names(stats) <- colnames(genes)
+# 
+# enrich_hallmark_genes <- map_df(stats, function(x) {
+#   enrich <- GSEA(x,
+#                  pAdjustMethod = 'fdr',
+#                  TERM2GENE = term_gene,
+#                  pvalueCutoff = 1,
+#                  maxGSSize = Inf)
+#   as_tibble(enrich)
+# }, .id = 'cell_id')
+# 
+# write_rds(enrich_hallmark_genes, 'data/enrich_hallmark_genes.rds')
+
+enrich_hallmark_genes <- read_rds('data/enrich_hallmark_genes.rds')
+```
+
+```{r correlation_enrichment}
+# join and tidy the correlation and enrichment variables
+correlation_ernichment <- gene_protein_hallmark %>%
+  full_join(enrich_hallmark_genes,
+            by = c('hallmark' = 'ID',
+                   'Var1' = 'cell_id')) %>%
+  dplyr::select(hallmark, Var1, value, NES, p.adjust) %>%
+  mutate(hallmark = as.numeric(fct_reorder(hallmark, (value))))
+```
+
+```{r hallmark_enrichment_plot}
+# plot the enrichment of the hallmarks
+signif_hallmarks <- group_by(correlation_ernichment, hallmark) %>%
+  summarise(n = sum(p.adjust < .2),
+            max = max(NES))
+
+hallmark_enrichment_plot <- correlation_ernichment %>%
+  ggplot(aes(x = (hallmark), y = NES, group = hallmark)) +
+  geom_boxplot() +
+  annotate('text', x = 1:10,
+           y = signif_hallmarks$max + .1,
+           label = paste0(signif_hallmarks$n, '*'),
+           size = 3) +
+  annotate('text', x = 5, y = 1.75, label = 'FDR < 0.2') +
+  labs(x = 'Cancer Hallmarks',
+       y = 'Enrichment Score') +
+  scale_x_continuous(sec.axis = dup_axis(),
+                     breaks = 1:10,
+                     labels = paste0('#', 1:10)) +
+  scale_y_continuous(sec.axis = dup_axis(), 
+                     limits = c(.6, 1.8),
+                     breaks = c(.8, 1, 1.2, 1.4, 1.6)) +
+  my_theme
+
+hallmark_enrichment_plot
+```
+
+The figure shows that some hallmarks are significantly enriched some cell lines.
+
+```{r gene_enrichment_points}
+# plot hallmark enrichment as points
+
+
+gene_enrichment_points <- gene_protein_hallmark %>%
+  full_join(enrich_hallmark_genes,
+            by = c('hallmark' = 'ID',
+                   'Var1' = 'cell_id')) %>%
+  dplyr::select(hallmark, Var1, value, NES, p.adjust) %>%
+  mutate(hallmark = as.numeric(fct_reorder(hallmark, (value)))) %>%
+  ggplot(aes(x = hallmark, y = NES, color = p.adjust < .2)) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:10, labels = paste0('#', 1:10)) +
+  labs(x = 'Cancer Hallmarks',
+       y = 'Enrichment Score',
+       color = 'FDR < 0.2: ') +
+  theme(legend.position = 'top',
+        legend.key.size = unit(3, "mm"),
+        legend.margin =margin(r=0,l=0,t=0,b=0))
+
+gene_enrichment_points
+```
+
+This figure shows the same enrichment results in more details.
+
+```{r hallmark_correlation_plot}
+# plot the correlation by hallmark
+hallmark_groups_test <- map_df(hallmark_groups, function(x) {
+  tidy(
+    wilcox.test(x,
+                hallmark_groups$random,
+                alternative = 'greater')
+  )
+}, .id = 'hallmark') %>%
+  filter(hallmark != 'random')
+
+min(hallmark_groups_test$statistic)
+max(hallmark_groups_test$p.value)
+
+max_corr <- group_by(correlation_ernichment, hallmark) %>% 
+  summarise(max = max(value)) %>%
+  pull(max)
+
+hallmark_correlation_plot <- correlation_ernichment %>%
+  ggplot(aes(x = hallmark, y = value, group = hallmark)) +
+  geom_boxplot() +
+  geom_hline(yintercept = mean(hallmark_groups$random), lty = 2, color = 'red') +
+  labs(x = 'Cancer Hallmarks', y = 'Gene-protein Correlation') +
+  scale_x_continuous(sec.axis = dup_axis(),
+                     breaks = 1:10, labels = paste0('#', 1:10)) +
+  annotate('text', x = 1, y = .63, size = 3, hjust = 0,
+           label = paste('* W >', min(hallmark_groups_test$statistic))) +
+  annotate('text', x = 1, y = .58, size = 3, hjust = 0,
+           label = '& P < 0.0001') +
+  annotate('text', x = 1:10, y = max_corr + .03, size = 3, label = '*') +
+  annotate('text', x = 7.5, y = .2, size = 3, color = 'red',
+           label = 'Random set average') +
+  scale_y_continuous(sec.axis = dup_axis()) +
+  my_theme
+
+hallmark_correlation_plot
+```
+
+This figure shows that the same hallmarks have a higher gene protein correlations than average, but not all hallmarks follow the enrichment trend.
+
+We then apply the same calculation to the protein-ranked list.
+
+```{r protein_enrichment}
+# enrichment of hallmarks in breast cancer cells (proteins)
+# stats <- lapply(seq_len(ncol(proteins)), function(i) proteins[,i])
+# stats <- map(stats, sort, decreasing = TRUE)
+# names(stats) <- colnames(proteins)
+# 
+# enrich_hallmark_proteins <- map_df(stats, function(x) {
+#   enrich <- GSEA(x,
+#                  pAdjustMethod = 'fdr',
+#                  TERM2GENE = term_gene,
+#                  pvalueCutoff = 1,
+#                  maxGSSize = Inf)
+#   as_tibble(enrich)
+# }, .id = 'cell_id')
+# 
+# write_rds(enrich_hallmark_proteins, 'data/enrich_hallmark_proteins.rds')
+
+enrich_hallmark_proteins <- read_rds('data/enrich_hallmark_proteins.rds')
+```
+
+```{r protein_enrichment_points}
+# plot hallmark enrichment as points
+protein_enrichment_points <- gene_protein_hallmark %>%
+  full_join(enrich_hallmark_proteins,
+            by = c('hallmark' = 'ID',
+                   'Var1' = 'cell_id')) %>%
+  dplyr::select(hallmark, Var1, value, NES, p.adjust) %>%
+  mutate(hallmark = as.numeric(fct_reorder(hallmark, (value)))) %>%
+  ggplot(aes(x = hallmark, y = NES, color = p.adjust < .2)) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:10, labels = paste0('#', 1:10)) +
+  labs(x = 'Cancer Hallmarks',
+       y = 'Enrichment Score',
+       color = 'FDR < 0.2: ') +
+  theme(legend.position = 'top',
+        legend.key.size = unit(3, "mm"),
+        legend.margin =margin(r=0,l=0,t=0,b=0))
+
+protein_enrichment_points
+```
+
+This figure shows the same enrichment results in more details.
+
+```{r enrichment_summary}
+# summarize the enrichment scores
+summary(enrich_hallmark_genes$NES)
+summary(enrich_hallmark_proteins)
+
+# numbers of significantly enriched terms
+table(enrich_hallmark_genes$p.adjust < .2)
+table(enrich_hallmark_proteins$p.adjust < .2)
+
+# numbers of enriched terms in each cell lines
+table(enrich_hallmark_genes$ID, enrich_hallmark_genes$p.adjust < .2)
+table(enrich_hallmark_genes$cell_id, enrich_hallmark_genes$p.adjust < .2)
+```
+
+## Difference in the hallmarks enrichment between genes and proteins
+
+Here we wanted to know if there is any pattern in the difference between the enrichment based on the gene or the protein ranks.
+
+For every hallmark in each cell line we subtracted the enrichment score which was based on the gene ranking from the one based on the protein ranking.
+
+```{r enrichment_difference}
+# calculate the difference between gene and protein enrichment
+enrichment_difference <- full_join(enrich_hallmark_genes,
+                                   enrich_hallmark_proteins,
+                                   by = c('cell_id', 'ID', 'Description')) %>%
+  mutate(ID = fct_reorder(ID, NES.x),
+         difference = NES.y - NES.x) 
+```
+
+```{r enrichment_difference_plot}
+# plot the difference in enrichment by hallmark
+n <- 10000
+set.seed(123)
+difference_groups_test <- enrichment_difference %>%
+  group_by(ID) %>%
+  summarise(p = {
+    original <- mean(NES.y - NES.x)
+    y <- sample(enrichment_difference$NES.y, 32)
+    x <- sample(enrichment_difference$NES.x, 32)
+    rand <- replicate(n, mean(y - x))
+    mean(abs(rand) >= abs(original))
+  },
+  min = min(difference))
+
+enrichment_difference_plot <- enrichment_difference %>%
+  left_join(difference_groups_test) %>%
+  mutate(p = ifelse(p < .0001, '*', '')) %>%
+  ggplot(aes(x = difference, y = as.numeric(ID), group = ID)) +
+  geom_point() +
+  geom_vline(xintercept = 0, lty = 2, color = 'red') +
+  geom_text(aes(x = min - .05, label = p)) +
+  annotate('text', x = -.6, y = 1.5, label = 'P < 0.0001', hjust = 0) +
+  labs(x = 'Difference in enrichment', y = 'Cancer Hallmarks') +
+  scale_y_continuous(sec.axis = dup_axis(),
+                     breaks = 1:10,
+                     labels = paste0('#', 1:10)) +
+  scale_x_continuous(sec.axis = dup_axis(),
+                     limits = c(-.6, .2),
+                     breaks = c(-.6, -.4, -.2, 0, .2)) +
+  my_theme
+
+enrichment_difference_plot
+```
+
+The figure shows that the difference in enrichment is roughly consistent between the cell lines. That is, for each hallmark, the difference in enrichment scores was higher or lower across the different cell line.
+
+Next, we asked whether these differences in enrichment associate with the division rate of the cell lines under no perturbations?
+
+```{r difference_divison}
+# join enrichment difference with division data and summarize
+difference_division  <- enrichment_difference %>%
+  inner_join(growth, by = c('cell_id' = 'Cell.Name')) %>%
+  group_by(cell_id, ID) %>%
+  summarise(difference = unique(difference),
+            ndr = mean(Nominal.Division.Rate))
+```
+
+```{r difference_division_plot}
+# plot difference in enrichment against the division rate
+difference_division_plot <- difference_division %>%
+  ggplot(aes(x = difference, y = ndr)) +
+  geom_density2d_filled()+
+  labs(x = 'Difference in enrichment',
+       y = 'Division Rate') +
+  theme(legend.position = 'none') +
+  scale_x_continuous(sec.axis = dup_axis(),
+                     limits = c(-.45, .25),
+                     expand = c(0, 0)) +
+  scale_y_continuous(sec.axis = dup_axis(),
+                     limits = c(-.1, 2.1),
+                     expand = c(0, 0)) +
+  geom_vline(xintercept = 0, lty = 2, color = 'white') +
+  geom_hline(yintercept = 1, lty = 2, color = 'white') +
+  my_theme
+
+difference_division_plot
+```
+
+The figure shows that the majority of cells cluster around little difference in enrichment and a moderate division rate. Small groups of cells showed a correlation with the division rate, which we further explored.
+
+```{r difference_lme}
+# model the relation between division and difference in enrichment
+difference_division_full <- inner_join(enrichment_difference,
+                                       growth,
+                                       by = c('cell_id' = 'Cell.Name')) %>%
+  dplyr::select(cell_id, ID, Nominal.Division.Rate, difference) %>%
+  na.omit()
+
+division_lm <- lme(Nominal.Division.Rate ~ difference ,
+                   random = ~1|ID,
+                   data = difference_division_full)
+
+summary(division_lm)
+```
+
+The fixed effect of the difference in enrichment was negative around `r division_lm$coefficients$fixed[2]`
+
+To identify the contribution of the individual hallmarks, we used a separate linear model for each as a group.
+
+```{r difference_lms}
+# model by group
+division_lm_list <- lmList(Nominal.Division.Rate ~ difference | ID,
+                           data = difference_division_full)
+
+division_conf <- map_df(confint(division_lm_list),
+                        ~as.data.frame(.x)[2,], .id = 'hallmark')
+
+summary(division_lm_list) 
+```
+
+The estimate of the effect of the difference in enrichment on the division rate was consistantly negative and significant.
+
+```{r division_test_plot}
+# plot the lm results of division vs difference in enrichment
+## make title
+tt3 <- paste0(
+  'FE = ',
+  round(unclass(summary(division_lm))$tTable[2,'Value'], 2),
+  '; P ',
+  ifelse(corr_anova$`Pr(>F)`[1] < .0001,
+         '< 0.0001',
+         paste0('= ', round(unclass(summary(division_lm))$tTable[2,'p-value'], 3)))
+)
+
+## make figure
+division_test_plot <- as.data.frame(unclass(summary(division_lm_list))$coefficients) %>%
+  rownames_to_column('hallmark') %>%
+  left_join(division_conf) %>%
+  mutate(hallmark = as.numeric(fct_reorder(hallmark, (Estimate.difference)))) %>%
+  ggplot(aes(x = hallmark, y = Estimate.difference)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `2.5 %`, ymax = `97.5 %`)) +
+  scale_x_continuous(breaks = 1:10, labels = paste0('#', 1:10)) +
+  coord_flip() +
+  labs(x = 'Cancer Hallmarks',
+       y = 'Division Rate (Estimate)') +
+  ggtitle(tt3)
+
+division_test_plot
+```
+
+The figure shows these estimates and the fixed effect size.
+
+Similarly, we asked whether these difference associate with the growth inhbition in the case of drug treatments.
+
+```{r difference_inhibition}
+# join difference in enrichment and growth inhibition
+difference_inhibition <- enrichment_difference %>%
+  inner_join(growth, by = c('cell_id' = 'Cell.Name')) %>%
+  group_by(cell_id, ID, Small.Molecule.Name) %>%
+  summarise(difference = unique(difference),
+            grmax = mean(Normalized.Growth.Rate.Inhibition.Value))
+```
+
+```{r difference_inhibition_plot}
+# plot difference in enrichment against the growth inhibition
+difference_inhibition_plot <- difference_inhibition %>%
+  ggplot(aes(x = difference, y = grmax)) +
+  geom_density2d_filled() +
+  geom_vline(xintercept = 0, lty = 2, color = 'white') +
+  geom_hline(yintercept = 0, lty = 2, color = 'white') +
+  geom_hline(yintercept = 1, lty = 2, color = 'white') +
+  labs(x = 'Difference in enrichment',
+       y = 'Growth Inhibition') +
+  theme(legend.position = 'none') +
+  scale_x_continuous(sec.axis = dup_axis(),
+                     limits = c(-.47, .25),
+                     expand = c(0, 0)) +
+  scale_y_continuous(sec.axis = dup_axis(),
+                     limits = c(-.9, 1.49),
+                     expand = c(0, 0)) +
+  my_theme
+
+difference_inhibition_plot
+```
+
+No clear correlation between the two variables could be discerned from the figure. Differences in enrichment at all levels were associated with moderate inhibition of growth as a result of drug perturbations.
+
+To test these association in a different way we do the following
+```{r test_difference_with_growth}
+# difference in enrichment and the division rate
+cor(difference_division$difference, difference_division$ndr)
+cor.test(difference_division$difference, difference_division$ndr)
+
+# difference in enrichment and growth inhibition with perturbations
+cor(difference_inhibition$difference, difference_inhibition$grmax)
+cor.test(difference_inhibition$difference, difference_inhibition$grmax)
+```
+
+To put both to gather we join the data in one big data.frame and aggregate the effects.
+
+```{r difference_growth}
+# join and tidy difference in enrichment and growth data
+difference_growth <- enrichment_difference %>%
+  inner_join(growth, by = c('cell_id' = 'Cell.Name')) %>%
+  group_by(cell_id, ID, Small.Molecule.Name) %>%
+  summarise(difference = unique(difference),
+            grmax = min(Normalized.Growth.Rate.Inhibition.Value),
+            ndr = mean(Nominal.Division.Rate)) %>%
+  ungroup() %>%
+  group_by(ID) %>%
+  summarise('Division_Rate_cor' = cor(difference, ndr),
+            'Division_Rate_p' = cor.test(difference, ndr)$p.value,
+            'Growth_Inhibition_cor' = cor(difference, grmax),
+            'Growth_Inhibition_p' = cor.test(difference, grmax)$p.value) %>%
+  mutate(ID = as.numeric(fct_reorder(ID, `Division_Rate_cor`)),
+         ID = paste0('#', as.factor(as.numeric(ID))),
+         ID = factor(ID, levels = paste0('#', 1:10))) %>%
+  gather(type1, cor, Division_Rate_cor, Growth_Inhibition_cor) %>%
+  gather(type2, pvalue, Division_Rate_p, Growth_Inhibition_p) %>%
+  mutate(type1 = str_replace_all(type1, '_|cor', ' ')) %>%
+  mutate(type2 = str_replace_all(type2, '_|p', ' ')) %>%
+  filter(type1 == type2)
+```
+
+```{r division_growth}
+# plot the correlation of difference to growth
+division_growth <- difference_growth %>%
+  mutate(p = ifelse(pvalue < .0001, '*', '')) %>%
+  ggplot(aes(x = cor, y = ID)) +
+  geom_col() +
+  geom_text(aes(x = cor - .05, label = p), vjust = 1) +
+  facet_wrap(~type1) +
+  annotate('text', x = -.55, y = 10, label = 'P < 0.0001', hjust = 0, size = 3) +
+  scale_x_continuous(breaks = -c(0, .25, .5), labels = c('0', '-0.25', '-0.5')) +
+  labs(x = "Pearson's Correlation",
+       y = 'Cancer Hallmarks') +
+  my_theme +
+  theme(panel.spacing = unit(-.2, 'mm'),
+        strip.background = element_blank())
+
+division_growth
+```
+
+The figure shows that strong correlations exist between the difference in enrichment and the division rates, but not the growth inhibition.
+
+## range of enrichment of the hallmarks
+
+Now, how about the range of enrichment based on either genes or proteins ranking? Do these ranges, max - min, correlate with the growth variables?
+
+To find out, we calculated the range by subtracting the minimum from the maximum enrichment score of the hallmarks which were based on either the genes or the proteins ranking.
+
+```{r enrichment_range}
+# calculate the range of enrichment
+enrichment_range <- enrichment_difference %>%
+  inner_join(growth, by = c('cell_id' = 'Cell.Name')) %>%
+  ungroup() %>%
+  group_by(cell_id, Small.Molecule.Name) %>%
+  summarise(
+    gene_min = min(NES.x),
+    gene_max = max(NES.x),
+    gene_diff = gene_max - gene_min,
+    protein_min = min(NES.y),
+    protein_max = max(NES.y),
+    protein_diff = protein_max - protein_min,
+    ndr_max = max(Relative.Cell.Count),
+    ndr_med = median(Nominal.Division.Rate),
+    grmax_med = median(Normalized.Growth.Rate.Inhibition.Value)
+  ) %>%
+  unique()
+```
+
+And then calculated the correlation with the medium growth variables for each cell line.
+
+```{r range_ndr_correaltion}
+# range of enrichment correlation with grmax_med
+range_ndr_correaltion <- enrichment_range %>%
+  group_by(Small.Molecule.Name) %>%
+  summarise(Genes = cor(gene_diff, ndr_med),
+            Proteins = cor(protein_diff, ndr_med))
+```
+
+```{r enrichment_range_plot}
+# plot the range of enrichment
+range_ndr_ttest <- t.test(range_ndr_correaltion$Genes,
+                          range_ndr_correaltion$Proteins,
+                          alternative = 'greater')
+range_ndr_ttest
+
+enrichment_range_plot <- range_ndr_correaltion %>%
+  gather(key, value, -Small.Molecule.Name) %>%
+  ggplot(aes(x = value, fill = key)) +
+  geom_bar(stat="bin", aes(y=..density..), alpha = .5) +
+  geom_vline(xintercept = range_ndr_ttest$estimate,
+             color = c('red', 'blue'),
+             lty = 2) +
+  geom_segment(aes(x = range_ndr_ttest$estimate[1],
+                   xend = range_ndr_ttest$estimate[2],
+                   y = 2, yend = 2),
+               arrow = arrow(length = unit(2, 'mm'))) +
+  geom_segment(aes(xend = range_ndr_ttest$estimate[1],
+                   x = range_ndr_ttest$estimate[2],
+                   y = 2, yend = 2),
+               arrow = arrow(length = unit(2, 'mm'))) +
+  annotate('text', x = -.45, y = 3, size = 3, hjust = 0,
+           label = paste('t =', round(range_ndr_ttest$statistic, 1))) +
+  annotate('text', x = -.45, y = 2.5, size = 3, hjust = 0,
+           label = paste('P < 0.0001')) +
+  labs(x = "Pearson's Correlation",
+       y = 'Percent of drugs',
+       fill = '') +
+  theme(legend.position = c(.5,.9),
+        legend.background = element_blank()) +
+  scale_x_continuous(sec.axis = dup_axis(),
+                     breaks = c(-.6,-.3, 0, .3)) +
+  scale_y_continuous(sec.axis = dup_axis()) +
+  my_theme
+
+enrichment_range_plot
+```
+
+The figure shows that the range of enrichment based on the proteins had strong and negative correlation with the growth inhibition under drug perturbations. That is, cells that had a wide range of enrichment of proteins were less likely to be inhibited by drug treatments.
+
+We then tested the difference between the cumulative distributions of the enrichment ranges of gene based and protein based ranking.
+
+```{r test_range_ndr}
+set.seed(123)
+ks.test(range_ndr_correaltion$Genes, 'rnorm', alternative = 'less')
+ks.test(range_ndr_correaltion$Proteins, 'rnorm', alternative = 'greater')
+
+range_ndr_test <- ks.test(range_ndr_correaltion$Genes, 
+                          range_ndr_correaltion$Proteins)
+
+range_ndr_test
+```
+
+```{r range_ndr_test_plot}
+cdf1 <- ecdf(range_ndr_correaltion$Genes) 
+cdf2 <- ecdf(range_ndr_correaltion$Proteins)
+
+minMax <- seq(min(range_ndr_correaltion$Genes, range_ndr_correaltion$Proteins, na.rm = TRUE),
+              max(range_ndr_correaltion$Genes, range_ndr_correaltion$Proteins, na.rm = TRUE),
+              length.out=length(range_ndr_correaltion$Genes)) 
+
+x0 <- minMax[which( abs(cdf1(minMax) - cdf2(minMax)) == max(abs(cdf1(minMax) - cdf2(minMax))) )] 
+y0 <- cdf1(x0) 
+y1 <- cdf2(x0) 
+
+tt4 <- paste0(
+  'D^+ = ',
+  round(range_ndr_test$statistic, 2),
+  '; P ',
+  ifelse(range_ndr_test$p.value < .0001,
+         '< 0.0001',
+         paste0('= ', round(range_ndr_test$p.value, 3)))
+)
+
+range_ndr_test_plot <- range_ndr_correaltion %>%
+  gather(key, value, -Small.Molecule.Name) %>%
+  ggplot() +
+  stat_ecdf(aes(x = value, color = key)) +
+  geom_segment(aes(x = x0[1], y = y0[1], xend = x0[1], yend = y1[1]),
+               linetype = "dashed" ) +
+  geom_point(aes(x = x0[1] , y= y0[1]), size=3) +
+  geom_point(aes(x = x0[1] , y= y1[1]), size=3) +
+  ggtitle(tt4) + 
+  labs(x = 'Gene-protein Correlation',
+       y = 'ECDF',
+       color = '') +
+  theme(legend.position = c(.47,.5),
+        legend.background = element_blank())
+
+range_ndr_test_plot
+```
+
+This figure shows the big difference between the cumulative distribution of both curves.
+
+# Final figures
+
+```{r final_figures}
+# hallmark_enrichment.png
+plot_grid(hallmark_enrichment_plot,
+          enrichment_difference_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/hallmark_enrichment.png',
+         width = 6, height = 3)
+
+# enrichment_test.png
+plot_grid(gene_enrichment_points,
+          protein_enrichment_points,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/enrichment_test.png',
+         width = 6, height = 3)
+
+# gene_protein_correlation.png
+plot_grid(gene_protein_corr_plot,
+          hallmark_correlation_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/gene_protein_correlation.png',
+         width = 6, height = 3)
+
+# gene_protein_correlation_tests.png
+plot_grid(gene_protein_test_plot,
+          corr_lm_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/gene_protein_correlation_tests.png',
+         width = 6, height = 3)
+
+# division_inhibition.png
+plot_grid(difference_division_plot,
+          difference_inhibition_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/division_inhibition.png',
+         width = 6, height = 3)
+
+# difference_range.png
+plot_grid(division_growth,
+          enrichment_range_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/difference_range.png',
+         width = 6, height = 3)
+
+# difference_range_tests.png
+plot_grid(division_test_plot,
+          range_ndr_test_plot,
+          nrow = 1,
+          scale = .9,
+          labels = 'AUTO',
+          label_fontface = 'plain') %>%
+  ggsave(plot = .,
+         filename = 'output/manuscript/figures/difference_range_tests.png',
+         width = 6, height = 3)
+```
+
