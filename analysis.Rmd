@@ -394,7 +394,13 @@ correlation_ernichment <- gene_protein_hallmark %>%
             by = c('hallmark' = 'ID',
                    'Var1' = 'cell_id')) %>%
   dplyr::select(hallmark, Var1, value, NES, p.adjust) %>%
-  mutate(hallmark = as.numeric(fct_reorder(hallmark, (value))))
+  mutate(name = hallmark,
+         hallmark = as.numeric(fct_reorder(hallmark, (value))))
+```
+
+```{r number_name_hallmarks}
+with(select(correlation_ernichment, hallmark, name) %>% unique() %>% arrange(hallmark),
+     paste('\\#', hallmark, ', ', name, collapse = '; ', sep = ''))
 ```
 
 ```{r hallmark_enrichment_plot}
@@ -912,7 +918,7 @@ range_ndr_test_plot <- range_ndr_correaltion %>%
   geom_point(aes(x = x0[1] , y= y0[1]), size=3) +
   geom_point(aes(x = x0[1] , y= y1[1]), size=3) +
   ggtitle(tt4) + 
-  labs(x = 'Gene-protein Correlation',
+  labs(x = 'Range-division correlation',
        y = 'ECDF',
        color = '') +
   theme(legend.position = c(.47,.5),

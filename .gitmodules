@@ -1,3 +1,6 @@
 [submodule "output/manuscript"]
 	path = output/manuscript
 	url = https://git.overleaf.com/614131a262bcaf9aba4697c2
+[submodule "output/manuscript_mbe"]
+	path = output/manuscript_mbe
+	url = https://git.overleaf.com/62ec78a188c2b55c659fc060
